@@ -1,0 +1,130 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: macro_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-macrointel}
+      POSTGRES_USER: ${POSTGRES_USER:-macrointel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-macrointel_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U macrointel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: macro_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: macro_chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: macro_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: macro_backend
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-macrointel}:${POSTGRES_PASSWORD:-macrointel_secret}@postgres:5432/${POSTGRES_DB:-macrointel}
+      - REDIS_URL=redis://redis:6379/0
+      - CHROMA_URL=http://chromadb:8000
+      - OLLAMA_URL=http://ollama:11434
+      - FRED_API_KEY=${FRED_API_KEY:-}
+      - ALPHA_VANTAGE_KEY=${ALPHA_VANTAGE_KEY:-}
+      - TWELVE_DATA_KEY=${TWELVE_DATA_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+      ollama:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: macro_worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-macrointel}:${POSTGRES_PASSWORD:-macrointel_secret}@postgres:5432/${POSTGRES_DB:-macrointel}
+      - REDIS_URL=redis://redis:6379/0
+      - CHROMA_URL=http://chromadb:8000
+      - OLLAMA_URL=http://ollama:11434
+      - FRED_API_KEY=${FRED_API_KEY:-}
+      - ALPHA_VANTAGE_KEY=${ALPHA_VANTAGE_KEY:-}
+      - TWELVE_DATA_KEY=${TWELVE_DATA_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: python -m app.workers.scheduler
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: macro_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8080
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/src:/app/src
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  ollama_data:
